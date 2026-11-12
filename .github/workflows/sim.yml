@@ -1,0 +1,116 @@
+name: sim
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "runs-on label (xcode-27 = Xcode 27 image, macos-26 = Xcode 26.x image)"
+        default: "xcode-27"
+      xcode:
+        description: "Xcode app path (macos-26 image: /Applications/Xcode_26.6.app)"
+        default: "/Applications/Xcode_27.2.app"
+      url:
+        description: "optional http(s) page to load in an extra remote state"
+        default: ""
+  push:
+    branches: [main]
+
+jobs:
+  sim:
+    runs-on: ${{ inputs.runner || 'xcode-27' }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash # runs "bash -eo pipefail", so a failing xcodebuild in a pipe fails the step
+    env:
+      DEVELOPER_DIR: ${{ inputs.xcode || '/Applications/Xcode_27.2.app' }}/Contents/Developer
+      BID: test.glassprobe.app
+      REMOTE_URL: ${{ inputs.url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show environment
+        run: |
+          mkdir -p out
+          { sw_vers; xcodebuild -version; xcrun --sdk iphonesimulator --show-sdk-version; xcrun simctl list runtimes; } 2>&1 | tee out/env.txt
+
+      - name: Pick newest iPhone Pro simulator
+        run: |
+          xcrun simctl list devices available -j > out/devices.json
+          # numeric sort on runtime version (iOS-27-10 after iOS-27-2) then on the iPhone number
+          SEL=$(jq -c '[.devices | to_entries[] | select(.key | test("SimRuntime.iOS-")) | .key as $k | .value[] | select(.name | test("^iPhone [0-9]+ Pro$")) | {k:($k | split("iOS-")[1] | split("-") | map(tonumber)), n:(.name | capture("^iPhone (?<x>[0-9]+)").x | tonumber), runtime:$k, name:.name, udid:.udid}] | sort_by([.k, .n]) | last // empty' out/devices.json)
+          test -n "$SEL" || { echo "no iPhone Pro simulator found"; exit 1; }
+          echo "$SEL" | tee out/device.txt
+          echo "UDID=$(echo "$SEL" | jq -r .udid)" >> "$GITHUB_ENV"
+
+      - name: Install XcodeGen and generate project
+        timeout-minutes: 5
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          brew install xcodegen
+          xcodegen --version
+          xcodegen generate
+
+      - name: Build for simulator (no signing)
+        timeout-minutes: 8
+        run: |
+          xcodebuild -project GlassProbe.xcodeproj -scheme GlassProbe -configuration Debug \
+            -sdk iphonesimulator -destination "id=$UDID" -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee out/build.log
+          test -d build/Build/Products/Debug-iphonesimulator/GlassProbe.app
+
+      - name: Boot and install
+        timeout-minutes: 5
+        run: |
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID"
+          sleep 5
+          xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/GlassProbe.app
+
+      # Stills use -freeze 1 (page does not scroll) so the backdrop is the same in every run.
+      - name: Screenshots for each state
+        timeout-minutes: 6
+        run: |
+          shoot() {
+            name=$1; shift
+            xcrun simctl terminate "$UDID" "$BID" 2>/dev/null || true
+            xcrun simctl launch "$UDID" "$BID" -freeze 1 "$@"
+            sleep 8
+            xcrun simctl io "$UDID" screenshot "out/$name.png"
+            test -s "out/$name.png"
+          }
+          shoot native -state native
+          shoot bar -state bar
+          shoot bar-light -state bar -light 1
+          shoot bar-edge -state bar -edge 1
+          shoot bar-insets -state bar -insets 1
+          shoot menu -state menu
+          shoot realmenu -state realmenu
+          shoot sheet -state sheet
+          shoot toolbar -state toolbar
+          if [ -n "$REMOTE_URL" ]; then shoot remote -state bar -url "$REMOTE_URL"; fi
+
+      - name: Record 6 seconds of the bar state (page scrolling)
+        timeout-minutes: 2
+        run: |
+          set -m # job control on, otherwise a background job ignores SIGINT
+          xcrun simctl terminate "$UDID" "$BID" 2>/dev/null || true
+          xcrun simctl launch "$UDID" "$BID" -state bar
+          sleep 5
+          xcrun simctl io "$UDID" recordVideo --codec=h264 --force out/bar.mp4 &
+          REC=$!
+          sleep 6
+          kill -INT "$REC"
+          for i in $(seq 30); do kill -0 "$REC" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$REC" 2>/dev/null; then kill -KILL "$REC"; echo "recorder did not stop after SIGINT"; exit 1; fi
+          test -s out/bar.mp4
+
+      - name: Upload screenshots, video, build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: glass-sim
+          path: out/
+          if-no-files-found: error

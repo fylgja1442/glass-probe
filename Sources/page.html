@@ -1,0 +1,50 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>
+  html{background:#111}
+  body{margin:0;font:17px -apple-system,system-ui,sans-serif;color:#fff}
+  /* fixed high-contrast strips behind the chat, under both pills and the top button; bubbles scroll over them */
+  .fx{position:fixed;left:0;right:0;z-index:-1;pointer-events:none;background:repeating-linear-gradient(45deg,#000 0 22px,#ffe600 22px 44px)}
+  .fx.t{top:0;height:130px}
+  .fx.b{bottom:0;height:200px}
+  .fx.t::before,.fx.b::before,.fx.b::after{content:"";position:absolute;left:0;right:0}
+  .fx.t::before{top:62px;height:24px;background:#fff}
+  .fx.b::before{bottom:76px;height:20px;background:#ff2d92}
+  .fx.b::after{bottom:44px;height:20px;background:#00e5ff}
+  .stripes{height:180px;background:repeating-linear-gradient(45deg,#000 0 22px,#ffe600 22px 44px)}
+  .photo{height:240px;background:radial-gradient(circle at 30% 30%,#fff7 0,#fff0 40%),
+    linear-gradient(135deg,#ff5f6d,#ffc371 35%,#47e6b1 65%,#3a7bd5)}
+  h1{font-size:64px;line-height:1;margin:24px 16px;letter-spacing:-2px}
+  .row{display:flex;padding:6px 12px}
+  .row.me{justify-content:flex-end}
+  .b{max-width:72%;padding:10px 14px;border-radius:20px;background:#2c2c2e}
+  .me .b{background:#0a84ff}
+</style></head>
+<body>
+<div class="fx t"></div><div class="fx b"></div>
+<h1>Live content under glass</h1>
+<div class="stripes"></div>
+<div class="photo"></div>
+<div id="list"></div>
+<script>
+  const t = ["Hey, are you there?","Yes! Look at this","That looks great","Sending the file now",
+    "Can you call me later?","Sure, around six","Ok, see you","Did it arrive?"];
+  const list = document.getElementById("list");
+  for (let i = 0; i < 80; i++) {
+    if (i % 10 === 0) { const s = document.createElement("div"); s.className = i % 20 ? "photo" : "stripes"; list.appendChild(s); }
+    const r = document.createElement("div"); r.className = "row" + (i % 3 === 0 ? " me" : "");
+    r.innerHTML = '<div class="b">' + t[i % t.length] + " " + i + "</div>";
+    list.appendChild(r);
+  }
+  // slow auto-scroll, bounces at both ends, so video shows moving content under the glass; the app sets window.FREEZE for stills
+  let y = 0, d = 1;
+  if (!window.FREEZE) (function step() {
+    const max = document.documentElement.scrollHeight - innerHeight;
+    y += d * 1.2;
+    if (y > max || y < 0) { d = -d; y = Math.max(0, Math.min(max, y)); }
+    scrollTo(0, y);
+    requestAnimationFrame(step);
+  })();
+</script>
+</body></html>
