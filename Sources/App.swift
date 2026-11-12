@@ -1,7 +1,8 @@
 import UIKit
 import WebKit
 
-// Launch args: -state bar|native|menu|realmenu|sheet|toolbar  -url <http url>  -edge 1  -insets 1  -freeze 1  -light 1
+// Launch args: -state bar|native|menu|realmenu|sheet|toolbar|live  -url <http url>  -edge 1  -insets 1  -freeze 1  -light 1
+// live: -url <page> -driver <script url> -demo 1 (see README)
 // Deployment target is iOS 26.0, so every iOS 26 symbol is used directly. A toolchain without the iOS 26 SDK fails the build loudly.
 // "native" = same pills over a native striped UIView with no WKWebView: it separates "VM cannot render glass" from "glass does not sample WKWebView".
 
@@ -60,6 +61,10 @@ final class ProbeViewController: UIViewController {
         return WKWebView(frame: .zero, configuration: c)
     }()
     var plusButton: UIButton?
+    // live state
+    var pageLoaded = false, driverRan = false, readyWritten = false
+    var driverText: String?
+    let pollStart = Date()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -72,9 +77,15 @@ final class ProbeViewController: UIViewController {
             if arg("-insets") == "1" {
                 webView.obscuredContentInsets = UIEdgeInsets(top: 0, left: 0, bottom: 150, right: 0)
             }
+            if state == "live" {
+                webView.navigationDelegate = self
+                fetchDriver()
+            }
             loadPage()
         }
-        if state == "toolbar" {
+        if state == "live" {
+            addComposer()
+        } else if state == "toolbar" {
             addToolbar()
         } else {
             let bars = addBars()
@@ -91,6 +102,7 @@ final class ProbeViewController: UIViewController {
         if state == "realmenu" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.plusButton?.performPrimaryAction() }
         }
+        if state == "live" { poll() }
     }
 
     func loadPage() {
@@ -235,10 +247,10 @@ final class ProbeViewController: UIViewController {
     }
 
     // No custom background on the sheet view: the system draws the sheet material (glass on iOS 26+).
-    func showSheet() {
+    func showSheet(title: String = "Sheet, medium detent") {
         let vc = UIViewController()
         let l = UILabel()
-        l.text = "Sheet, medium detent"
+        l.text = title
         l.font = .preferredFont(forTextStyle: .title2)
         l.translatesAutoresizingMaskIntoConstraints = false
         vc.view.addSubview(l)
@@ -253,5 +265,118 @@ final class ProbeViewController: UIViewController {
             s.largestUndimmedDetentIdentifier = .medium
         }
         present(vc, animated: true)
+    }
+
+    // MARK: live state
+
+    // Composer row like the iOS 26 Messages composer: round glass +, glass capsule, round glass send, 12 pt above the bottom safe area.
+    func addComposer() {
+        let menu = UIMenu(children: [
+            UIAction(title: "Photos", image: UIImage(systemName: "photo")) { _ in },
+            UIAction(title: "Camera", image: UIImage(systemName: "camera")) { _ in },
+            UIAction(title: "Files", image: UIImage(systemName: "doc")) { _ in },
+            UIAction(title: "GIF", image: UIImage(systemName: "face.smiling")) { _ in },
+            UIAction(title: "Background", image: UIImage(systemName: "paintbrush")) { _ in },
+        ])
+        let plus = roundGlassButton("plus")
+        plus.menu = menu
+        plus.showsMenuAsPrimaryAction = true
+        plusButton = plus
+        let send = roundGlassButton("arrow.up")
+        let capsule = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+        capsule.cornerConfiguration = .capsule(maximumRadius: nil)
+        let label = UILabel()
+        label.text = "Message"
+        label.textColor = .secondaryLabel
+        label.translatesAutoresizingMaskIntoConstraints = false
+        capsule.contentView.addSubview(label)
+        capsule.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(capsule)
+        let g = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: capsule.contentView.leadingAnchor, constant: 18),
+            label.centerYAnchor.constraint(equalTo: capsule.contentView.centerYAnchor),
+            plus.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 16),
+            plus.bottomAnchor.constraint(equalTo: g.bottomAnchor, constant: -12),
+            send.trailingAnchor.constraint(equalTo: g.trailingAnchor, constant: -16),
+            send.bottomAnchor.constraint(equalTo: g.bottomAnchor, constant: -12),
+            capsule.leadingAnchor.constraint(equalTo: plus.trailingAnchor, constant: 8),
+            capsule.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -8),
+            capsule.bottomAnchor.constraint(equalTo: g.bottomAnchor, constant: -12),
+            capsule.heightAnchor.constraint(equalToConstant: 52),
+        ])
+    }
+
+    func roundGlassButton(_ icon: String) -> UIButton {
+        var cfg = UIButton.Configuration.glass()
+        cfg.image = UIImage(systemName: icon)
+        let b = UIButton(configuration: cfg)
+        b.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(b)
+        NSLayoutConstraint.activate([
+            b.widthAnchor.constraint(equalToConstant: 52),
+            b.heightAnchor.constraint(equalToConstant: 52),
+        ])
+        return b
+    }
+
+    // The driver script text comes from -driver; it runs once, after both it and the first didFinish have arrived.
+    func fetchDriver() {
+        guard let s = arg("-driver"), let u = URL(string: s) else { finishLive("KIT_FAIL: no driver url"); return }
+        URLSession.shared.dataTask(with: u) { data, response, _ in
+            DispatchQueue.main.async {
+                // a non-200 answer is an error page, not a script: never evaluate it
+                guard (response as? HTTPURLResponse)?.statusCode == 200, let data, let text = String(data: data, encoding: .utf8) else { self.finishLive("KIT_FAIL: driver fetch"); return }
+                self.driverText = text
+                self.runDriverIfReady()
+            }
+        }.resume()
+    }
+
+    func runDriverIfReady() {
+        guard pageLoaded, !driverRan, let text = driverText else { return }
+        driverRan = true
+        webView.evaluateJavaScript(text, completionHandler: nil)
+    }
+
+    // 4 times a second: stop on a KIT_READY or KIT_FAIL title, or after 180 s (the driver may wait up to 100 s for the account alone).
+    func poll() {
+        guard !readyWritten else { return }
+        webView.evaluateJavaScript("document.title") { result, _ in
+            let t = (result as? String) ?? ""
+            if t.hasPrefix("KIT_READY") || t.hasPrefix("KIT_FAIL") {
+                self.finishLive(t)
+            } else if Date().timeIntervalSince(self.pollStart) > 180 {
+                self.finishLive("TIMEOUT")
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.poll() }
+            }
+        }
+    }
+
+    // ready.txt in Documents is what the CI script waits for (simctl get_app_container <udid> <bundle id> data).
+    func finishLive(_ text: String) {
+        guard !readyWritten else { return }
+        readyWritten = true
+        if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            try? text.write(to: dir.appendingPathComponent("ready.txt"), atomically: true, encoding: .utf8)
+        }
+        if arg("-demo") == "1" { runDemo() }
+    }
+
+    // Fixed sequence, seconds after the ready file: 5 open the real UIMenu, 9 close it, 10 sheet, 14 dismiss.
+    func runDemo() {
+        let q = DispatchQueue.main
+        q.asyncAfter(deadline: .now() + 5) { self.plusButton?.performPrimaryAction() }
+        q.asyncAfter(deadline: .now() + 9) { self.plusButton?.contextMenuInteraction?.dismissMenu() }
+        q.asyncAfter(deadline: .now() + 10) { self.showSheet(title: "Chat background") }
+        q.asyncAfter(deadline: .now() + 14) { self.dismiss(animated: true) }
+    }
+}
+
+extension ProbeViewController: WKNavigationDelegate {
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        pageLoaded = true
+        runDriverIfReady()
     }
 }

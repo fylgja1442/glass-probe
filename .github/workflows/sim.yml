@@ -18,7 +18,7 @@ on:
 jobs:
   sim:
     runs-on: ${{ inputs.runner || 'macos-26' }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     defaults:
       run:
         shell: bash # runs "bash -eo pipefail", so a failing xcodebuild in a pipe fails the step
@@ -121,4 +121,71 @@ jobs:
         with:
           name: glass-sim
           path: out/
+          if-no-files-found: error
+
+      # Live state: runs only when both secrets are set. Nothing from it goes into the plain artifact above.
+      - name: Live gate
+        id: gate
+        env:
+          PAGE_URL: ${{ secrets.PAGE_URL }}
+          DRIVER_URL: ${{ secrets.DRIVER_URL }}
+        run: |
+          if [ -n "$PAGE_URL" ] && [ -n "$DRIVER_URL" ]; then echo "go=1" >> "$GITHUB_OUTPUT"; else echo "live state skipped"; fi
+
+      - name: Live state (video and screenshots, kept private)
+        if: steps.gate.outputs.go == '1'
+        timeout-minutes: 8
+        env:
+          PAGE_URL: ${{ secrets.PAGE_URL }}
+          DRIVER_URL: ${{ secrets.DRIVER_URL }}
+        run: |
+          set -m # job control on, otherwise a background job ignores SIGINT
+          mkdir -p live
+          exec >> live/log.txt 2>&1 # no set -x, and the log is only ever uploaded encrypted
+          xcrun simctl terminate "$UDID" "$BID" 2>/dev/null || true
+          D=$(xcrun simctl get_app_container "$UDID" "$BID" data)
+          rm -f "$D/Documents/ready.txt"
+          xcrun simctl launch "$UDID" "$BID" -state live -url "$PAGE_URL" -driver "$DRIVER_URL" -demo 1
+          for i in $(seq 400); do [ -s "$D/Documents/ready.txt" ] && break; sleep 0.5; done
+          if [ ! -s "$D/Documents/ready.txt" ]; then
+            echo "NOREADY" > live/ready.txt
+            xcrun simctl io "$UDID" screenshot live/live-bar.png
+            exit 0
+          fi
+          cp "$D/Documents/ready.txt" live/ready.txt
+          T0=$SECONDS
+          at() { while [ $((SECONDS - T0)) -lt "$1" ]; do sleep 0.5; done; }
+          xcrun simctl io "$UDID" recordVideo --codec=h264 --force live/live.mp4 &
+          REC=$!
+          at 2; xcrun simctl io "$UDID" screenshot live/live-bar.png
+          at 7; xcrun simctl io "$UDID" screenshot live/live-menu.png
+          at 12; xcrun simctl io "$UDID" screenshot live/live-sheet.png
+          at 18
+          kill -INT "$REC"
+          for i in $(seq 30); do kill -0 "$REC" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$REC" 2>/dev/null; then kill -KILL "$REC"; echo "recorder did not stop after SIGINT"; exit 1; fi
+
+      - name: Encrypt live results
+        if: always() && steps.gate.outputs.go == '1'
+        run: |
+          trap 'rm -rf live live.tar live.key' EXIT # plain files never survive this step
+          test -d live
+          OSSL=/opt/homebrew/opt/openssl@3/bin/openssl
+          [ -x "$OSSL" ] || OSSL=openssl
+          "$OSSL" version
+          tar -cf live.tar -C live .
+          "$OSSL" rand -hex 32 > live.key
+          "$OSSL" enc -aes-256-cbc -pbkdf2 -iter 10000 -md sha256 -pass file:live.key -in live.tar -out live.tar.enc
+          "$OSSL" pkeyutl -encrypt -pubin -inkey art_pub.pem -pkeyopt rsa_padding_mode:oaep -in live.key -out live.key.enc
+          test -s live.tar.enc && test -s live.key.enc
+
+      - name: Upload encrypted live results
+        if: always() && steps.gate.outputs.go == '1'
+        uses: actions/upload-artifact@v7
+        with:
+          name: glass-live
+          path: |
+            live.tar.enc
+            live.key.enc
+          retention-days: 1
           if-no-files-found: error

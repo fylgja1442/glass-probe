@@ -36,7 +36,22 @@ Compare the glass pill with the blur pill in `native.png` first. Glass that lens
 
 ## Launch arguments
 
-`-state bar|native|menu|realmenu|sheet|toolbar`, `-url <http url>`, `-edge 1`, `-insets 1`, `-freeze 1`, `-light 1`; state `native` added.
+`-state bar|native|menu|realmenu|sheet|toolbar|live`, `-url <http url>`, `-edge 1`, `-insets 1`, `-freeze 1`, `-light 1`; state `native` added. State `live` also takes `-driver <script url>` and `-demo 1`.
+
+## Live state (optional, private)
+
+State `live` loads a web page full screen, fetches a script from a second address, runs it once in the page after the first load, and puts a native glass composer row over the page: a round glass + button (with a menu: Photos, Camera, Files, GIF, Background), a glass capsule reading "Message", and a round glass send button, 12 pt above the bottom safe area.
+
+- The page script reports only through `document.title`: `KIT_READY` when the page is ready to film, or `KIT_FAIL: <step>` when it gives up. The app polls the title 4 times a second for up to 180 s, then writes the text (or `TIMEOUT`) to `ready.txt` in its Documents folder. After `KIT_READY` the script scrolls the page on its own and hides the page's own typing bar while keeping its space.
+- With `-demo 1`, timed from `ready.txt`: at 5 s the real `UIMenu` opens from the + button (`performPrimaryAction`), at 9 s it closes (`dismissMenu`), at 10 s the sheet "Chat background" opens at the medium detent, at 14 s it closes.
+- The workflow runs this only when the repository secrets `PAGE_URL` and `DRIVER_URL` are both set. It records 18 s of video, takes `live-bar.png`, `live-menu.png`, `live-sheet.png` (about 2, 7 and 12 s after ready) and keeps `ready.txt` and a log. Nothing from this block is uploaded in the clear: the files are tarred, encrypted with a random AES-256 key, and that key is encrypted with `art_pub.pem`. Artifact `glass-live` (kept 1 day) holds only `live.tar.enc` and `live.key.enc`.
+
+To decrypt, the holder of the matching private key (`private.pem`) runs:
+
+```
+openssl pkeyutl -decrypt -inkey private.pem -pkeyopt rsa_padding_mode:oaep -in live.key.enc -out live.key
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 10000 -md sha256 -pass file:live.key -in live.tar.enc | tar -x
+```
 
 ## Files
 
