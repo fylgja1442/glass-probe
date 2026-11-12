@@ -100,29 +100,6 @@ jobs:
           shoot toolbar -state toolbar
           if [ -n "$REMOTE_URL" ]; then shoot remote -state bar -url "$REMOTE_URL"; fi
 
-      - name: Record 6 seconds of the bar state (page scrolling)
-        timeout-minutes: 2
-        run: |
-          set -m # job control on, otherwise a background job ignores SIGINT
-          xcrun simctl terminate "$UDID" "$BID" 2>/dev/null || true
-          xcrun simctl launch "$UDID" "$BID" -state bar
-          sleep 5
-          xcrun simctl io "$UDID" recordVideo --codec=h264 --force out/bar.mp4 &
-          REC=$!
-          sleep 6
-          kill -INT "$REC"
-          for i in $(seq 30); do kill -0 "$REC" 2>/dev/null || break; sleep 1; done
-          if kill -0 "$REC" 2>/dev/null; then kill -KILL "$REC"; echo "recorder did not stop after SIGINT"; exit 1; fi
-          test -s out/bar.mp4
-
-      - name: Upload screenshots, video, build log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: glass-sim
-          path: out/
-          if-no-files-found: error
-
       # Live state: runs only when both secrets are set. Nothing from it goes into the plain artifact above.
       - name: Live gate
         id: gate
@@ -141,6 +118,7 @@ jobs:
         run: |
           set -m # job control on, otherwise a background job ignores SIGINT
           mkdir -p live
+          trap 'pkill -KILL -f recordVideo 2>/dev/null || true' EXIT # no recorder outlives this step
           exec >> live/log.txt 2>&1 # no set -x, and the log is only ever uploaded encrypted
           xcrun simctl terminate "$UDID" "$BID" 2>/dev/null || true
           D=$(xcrun simctl get_app_container "$UDID" "$BID" data)
@@ -161,7 +139,7 @@ jobs:
           at 7; xcrun simctl io "$UDID" screenshot live/live-menu.png
           at 12; xcrun simctl io "$UDID" screenshot live/live-sheet.png
           at 18
-          kill -INT "$REC"
+          kill -INT "$REC" || echo "recorder was already gone"
           for i in $(seq 30); do kill -0 "$REC" 2>/dev/null || break; sleep 1; done
           if kill -0 "$REC" 2>/dev/null; then kill -KILL "$REC"; echo "recorder did not stop after SIGINT"; exit 1; fi
 
@@ -188,4 +166,29 @@ jobs:
             live.tar.enc
             live.key.enc
           retention-days: 1
+          if-no-files-found: error
+
+      - name: Record 6 seconds of the bar state (page scrolling)
+        timeout-minutes: 2
+        continue-on-error: true
+        run: |
+          set -m # job control on, otherwise a background job ignores SIGINT
+          xcrun simctl terminate "$UDID" "$BID" 2>/dev/null || true
+          xcrun simctl launch "$UDID" "$BID" -state bar
+          sleep 5
+          xcrun simctl io "$UDID" recordVideo --codec=h264 --force out/bar.mp4 &
+          REC=$!
+          sleep 6
+          kill -INT "$REC" || echo "recorder was already gone"
+          for i in $(seq 30); do kill -0 "$REC" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$REC" 2>/dev/null; then kill -KILL "$REC"; echo "recorder did not stop after SIGINT"; exit 1; fi
+          test -s out/bar.mp4
+
+      - name: Upload screenshots, video, build log
+        if: always()
+        timeout-minutes: 4
+        uses: actions/upload-artifact@v7
+        with:
+          name: glass-sim
+          path: out/
           if-no-files-found: error
