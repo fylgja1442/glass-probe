@@ -61,12 +61,12 @@ jobs:
           xcodegen --version
           xcodegen generate
 
-      - name: Build for simulator (no signing)
+      - name: Build for simulator (signed to run locally, so the keychain works)
         timeout-minutes: 8
         run: |
           xcodebuild -project GlassProbe.xcodeproj -scheme GlassProbe -configuration Debug \
             -sdk iphonesimulator -destination "id=$UDID" -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO 2>&1 | tee out/build.log
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES 2>&1 | tee out/build.log
           test -d build/Build/Products/Debug-iphonesimulator/GlassProbe.app
 
       - name: Boot and install
